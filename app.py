@@ -60,55 +60,86 @@ def fetch_image(url):
 
 
 # ---------------- onboarding: simulated scrape ----------------
+def render_color_swatches(colors):
+    swatches = "".join(
+        f'<div style="display:inline-block;text-align:center;margin-right:10px">'
+        f'<div style="width:42px;height:42px;border-radius:8px;background:{v};'
+        f'border:1px solid rgba(0,0,0,0.15)"></div>'
+        f'<div style="font-size:11px;margin-top:2px">{k}</div></div>'
+        for k, v in colors.items() if isinstance(v, str) and v.startswith("#")
+    )
+    if swatches:
+        st.markdown(swatches, unsafe_allow_html=True)
+
+
 def run_scrape_animation(website_url, insta_handle):
     """~30s animated 'scrape' of the site + Instagram. Data is canned fixtures
     in data/business-onboarding/ (no live scraping), timed to feel live.
-    The progress/status placeholders are cleared at the end; the revealed
-    screenshot and Instagram preview are left on screen (not cleared) and are
-    also redrawn by render_scrape_media() on every later rerun."""
+    Each discovery (screenshot, colors, logo, profile, posts) is revealed the
+    moment its step completes rather than all at once at the end. The
+    progress/status placeholders are cleared when done; the revealed content
+    is left on screen and is also redrawn by render_scrape_media() on every
+    later rerun."""
     insta_handle = (insta_handle or "").lstrip("@").strip()
     website = load_json(WEBSITE_SCRAPE_PATH, {}).get("data", {})
     insta_list = load_json(INSTAGRAM_SCRAPE_PATH, [])
     insta = insta_list[0] if insta_list else {}
+    branding = website.get("branding", {})
+    logo = branding.get("images", {}).get("logo") or branding.get("logo")
 
     status = st.empty()
     bar = st.progress(0)
     shot_area = st.empty()
+    colors_area = st.empty()
+    logo_area = st.empty()
 
-    for pct, label, pause in [
-        (10, f"🌐 Connecting to {website_url or 'your website'}...", 2.2),
-        (25, "🌐 Fetching homepage & key pages...", 2.2),
-        (40, "🌐 Reading page content & copy...", 2.2),
-        (55, "🎨 Extracting color palette & fonts...", 2.2),
-        (70, "🧬 Detecting logo...", 2.2),
-        (85, "🧠 Analyzing brand personality & tone...", 2.2),
-        (100, "✅ Website scrape complete", 1.0),
+    for pct, label, pause, reveal in [
+        (10, f"🌐 Connecting to {website_url or 'your website'}...", 2.0, None),
+        (25, "🌐 Fetching homepage & key pages...", 2.0, "screenshot"),
+        (40, "🌐 Reading page content & copy...", 2.0, None),
+        (60, "🎨 Extracting color palette & fonts...", 2.2, "colors"),
+        (80, "🧬 Detecting logo...", 2.2, "logo"),
+        (92, "🧠 Analyzing brand personality & tone...", 2.0, None),
+        (100, "✅ Website scrape complete", 1.0, None),
     ]:
         status.markdown(f"**{label}**")
         bar.progress(pct)
         time.sleep(pause)
-    if website.get("screenshot"):
-        with shot_area.container():
-            st.image(website["screenshot"], caption=f"Screenshot · {website_url or 'homepage'}", width=420)
+        if reveal == "screenshot" and website.get("screenshot"):
+            with shot_area.container():
+                st.image(website["screenshot"], caption=f"Screenshot · {website_url or 'homepage'}", width=420)
+        elif reveal == "colors" and branding.get("colors"):
+            with colors_area.container():
+                st.caption("Detected palette")
+                render_color_swatches(branding["colors"])
+        elif reveal == "logo" and logo:
+            with logo_area.container():
+                st.image(logo, width=90, caption="Logo")
     time.sleep(1.0)
 
     status2 = st.empty()
     bar2 = st.progress(0)
-    insta_area = st.empty()
-    for pct, label, pause in [
-        (15, f"📸 Connecting to Instagram {insta_handle or ''}...", 1.8),
-        (35, "📸 Fetching profile info...", 1.8),
-        (55, "📸 Pulling recent posts...", 1.8),
-        (75, "⬇️ Downloading media...", 1.8),
-        (90, "🔖 Analyzing captions & hashtags...", 1.8),
-        (100, "✅ Instagram scrape complete", 1.0),
+    insta_header_area = st.empty()
+    insta_posts_area = st.empty()
+    posts = insta.get("latestPosts", [])[:6]
+    for pct, label, pause, reveal in [
+        (15, f"📸 Connecting to Instagram {insta_handle or ''}...", 1.8, None),
+        (35, "📸 Fetching profile info...", 1.8, "header"),
+        (55, "📸 Pulling recent posts...", 0, "posts"),
+        (75, "⬇️ Downloading media...", 1.6, None),
+        (90, "🔖 Analyzing captions & hashtags...", 1.6, None),
+        (100, "✅ Instagram scrape complete", 1.0, None),
     ]:
         status2.markdown(f"**{label}**")
         bar2.progress(pct)
-        time.sleep(pause)
-    if insta:
-        with insta_area.container():
-            render_instagram_preview(insta, insta_handle)
+        if reveal == "header" and insta:
+            time.sleep(pause)
+            with insta_header_area.container():
+                render_instagram_header(insta, insta_handle)
+        elif reveal == "posts" and posts:
+            reveal_posts_progressively(insta_posts_area, posts)
+        else:
+            time.sleep(pause)
     time.sleep(1.0)
 
     final = st.empty()
@@ -125,7 +156,7 @@ def run_scrape_animation(website_url, insta_handle):
     return build_profile_from_scrape(website_url, insta_handle, website, insta)
 
 
-def render_instagram_preview(insta, insta_handle):
+def render_instagram_header(insta, insta_handle):
     h1, h2 = st.columns([1, 5])
     with h1:
         pic = fetch_image(insta.get("profilePicUrl"))
@@ -135,6 +166,23 @@ def render_instagram_preview(insta, insta_handle):
         st.markdown(f"**@{insta.get('username', insta_handle)}** · "
                     f"{insta.get('followersCount', 0):,} followers")
         st.caption(insta.get("biography", ""))
+
+
+def reveal_posts_progressively(area, posts, per_image_pause=0.4):
+    shots = []
+    for post in posts:
+        shots.append(fetch_image(post.get("displayUrl")))
+        with area.container():
+            cols = st.columns(len(posts))
+            for col, shot in zip(cols, shots):
+                with col:
+                    if shot:
+                        st.image(shot, use_container_width=True)
+        time.sleep(per_image_pause)
+
+
+def render_instagram_preview(insta, insta_handle):
+    render_instagram_header(insta, insta_handle)
     posts = insta.get("latestPosts", [])[:6]
     if posts:
         cols = st.columns(len(posts))
@@ -217,16 +265,7 @@ def render_brand_kit(scraped):
         if scraped.get("logo"):
             st.image(scraped["logo"], width=100)
     with k2:
-        colors = scraped.get("colors") or {}
-        if colors:
-            swatches = "".join(
-                f'<div style="display:inline-block;text-align:center;margin-right:10px">'
-                f'<div style="width:42px;height:42px;border-radius:8px;background:{v};'
-                f'border:1px solid rgba(0,0,0,0.15)"></div>'
-                f'<div style="font-size:11px;margin-top:2px">{k}</div></div>'
-                for k, v in colors.items() if isinstance(v, str) and v.startswith("#")
-            )
-            st.markdown(swatches, unsafe_allow_html=True)
+        render_color_swatches(scraped.get("colors") or {})
         fonts = scraped.get("fonts") or {}
         if fonts:
             st.caption("Fonts: " + ", ".join(f"{role}: {name}" for role, name in fonts.items()))
