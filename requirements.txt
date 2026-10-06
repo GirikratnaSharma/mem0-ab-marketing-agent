@@ -1,0 +1,5 @@
+streamlit>=1.40
+mem0ai>=2.2
+pandas
+python-dotenv
+anthropic>=1.0
