@@ -49,3 +49,5 @@ python setup_mem0.py          # once per Mem0 project: sets the extraction rules
 python demo_memory.py         # business #2 recalls what business #1 learned
 ```
 Keep raw metrics for the dashboard in the app's own store. Mem0 holds facts and lessons, not numbers.
+
+Tests: `pytest` runs the Mem0 + simulated-data tests (`tests/test_mem0_simulated.py`). Live Mem0 tests run only when `MEM0_API_KEY` is set; `pytest -m "not live"` runs offline only.

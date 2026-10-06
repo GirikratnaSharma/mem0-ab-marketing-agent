@@ -111,7 +111,15 @@ class MemoryStore:
         items = [m for m in self._load() if m["user_id"] != self.user_id]
         self._save(items)
         if self.client:
+            # Delete per record id: delete_all(filters={"user_id": ...}) is rejected by the
+            # Mem0 API (400), and delete_all's async sweep can also wipe adds made right after.
             try:
-                self.client.delete_all(filters={"user_id": self.user_id})
+                filters = {"AND": [{"user_id": self.user_id}]}
+                while True:
+                    batch = self.client.get_all(filters=filters, page_size=50)["results"]
+                    if not batch:
+                        break
+                    for m in batch:
+                        self.client.delete(memory_id=m["id"])
             except Exception as e:
                 self.last_error = str(e)
