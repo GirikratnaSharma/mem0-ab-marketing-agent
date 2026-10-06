@@ -129,14 +129,14 @@ elif page == "New campaign":
             "llm_context": agent.build_llm_context(context, brief, channel),
         }
         draft = st.session_state.draft
-        draft["copy"], draft["copy_note"] = None, "Rule-based copy (set ANTHROPIC_API_KEY for Claude)."
+        draft["copy"], draft["copy_note"] = None, "Rule-based copy (set OLLAMA_MODEL, KIMI_API_KEY or ANTHROPIC_API_KEY)."
         if llm.available():
             try:
-                with st.spinner("Claude is writing the variants from memory..."):
+                with st.spinner(f"{llm.provider()} is writing the variants from memory..."):
                     draft["copy"] = llm.write_variants(channel, draft["plan"], draft["llm_context"], brand_name)
-                draft["copy_note"] = f"✍️ Written by Claude: {draft['copy']['rationale']}"
+                draft["copy_note"] = f"✍️ Written by {llm.provider()}: {draft['copy']['rationale']}"
             except Exception as e:  # keep the demo alive
-                draft["copy_note"] = f"Claude call failed, using rule-based copy: {e}"
+                draft["copy_note"] = f"{llm.provider()} call failed, using rule-based copy: {e}"
         st.session_state.pop("last_result", None)
 
     draft = st.session_state.get("draft")
@@ -151,7 +151,7 @@ elif page == "New campaign":
                     st.caption("No learnings yet. This is the first test on this channel.")
             else:
                 st.caption("Memory is OFF, so the agent ignores past learnings.")
-            st.markdown("**Context fed to Claude:**")
+            st.markdown("**Context fed to the LLM:**")
             st.code(draft["llm_context"], language="text")
 
         p = draft["plan"]

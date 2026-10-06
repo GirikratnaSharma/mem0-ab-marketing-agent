@@ -27,7 +27,7 @@ cp .env.example .env   # add MEM0_API_KEY
 ## Code map
 - `app.py`: Streamlit UI (Dashboard, New campaign, Onboarding, Memory)
 - `agent.py`: agent loop `recall -> plan -> simulate -> learn`. Planning and copy are **placeholder rule-based logic**; `build_llm_context()` is where recalled Mem0 context will be re-fed into an LLM.
-- `llm.py`: Claude (`claude-opus-5-5`) writes the Variant A/B copy from `build_llm_context()` (brand memory + past learnings). Needs `ANTHROPIC_API_KEY` in `.env`; falls back to rule-based copy without it.
+- `llm.py`: a free local model via Ollama (`OLLAMA_MODEL`), Kimi (`kimi-k2.6`, via `KIMI_API_KEY`) or Claude (`claude-opus-5-5`, via `ANTHROPIC_API_KEY`) writes the Variant A/B copy from `build_llm_context()` (brand memory + past learnings). Falls back to rule-based copy when none is set.
 - `memory_store.py`: dashboard memory adapter (Mem0 + local JSON mirror/fallback). **TODO:** route its Mem0 calls through `memory.py` `remember()`/`recall()` so the dashboard also uses the shared agent shelf.
 
 ## How Mem0 is used
