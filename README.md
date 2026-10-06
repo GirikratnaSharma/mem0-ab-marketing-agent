@@ -16,3 +16,18 @@ A marketing agent that runs A/B tests on campaigns and **remembers what worked**
 - [@deepupai](https://github.com/deepupai)
 - [@sakshamrai101](https://github.com/sakshamrai101)
 - [@Ruta-U](https://github.com/Ruta-U)
+
+## Memory (Mem0)
+`memory.py` is the only file that talks to Mem0. Use `remember(business_id, exchange)` to store and `recall(business_id, query)` to read.
+
+- `user_id` = one business (brand profile, what worked for them). Private to that business.
+- `agent_id` = the marketing agent (general lessons). Shared across every business.
+
+Setup:
+```bash
+pip install -r requirements.txt
+cp .env.example .env          # add your MEM0_API_KEY
+python setup_mem0.py          # once per Mem0 project: sets the extraction rules
+python demo_memory.py         # business #2 recalls what business #1 learned
+```
+Keep raw metrics for the dashboard in the app's own store. Mem0 holds facts and lessons, not numbers.
