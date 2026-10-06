@@ -337,9 +337,9 @@ if page == "Onboarding":
     st.subheader("🔎 Auto-fill from your website + Instagram")
     c1, c2, c3 = st.columns([2, 2, 1])
     with c1:
-        website_url = st.text_input("Website URL", placeholder="https://yourbusiness.com")
+        website_url = st.text_input("Website URL", value="https://kungfukids.com")
     with c2:
-        insta_handle = st.text_input("Instagram handle", placeholder="@yourbusiness")
+        insta_handle = st.text_input("Instagram handle", value="@wushucentral")
     with c3:
         st.write("")
         st.write("")
