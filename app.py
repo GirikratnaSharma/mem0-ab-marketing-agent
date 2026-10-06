@@ -8,6 +8,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import agent
+import llm
 from memory_store import DATA_DIR, MemoryStore
 
 load_dotenv()
@@ -127,6 +128,15 @@ elif page == "New campaign":
             "plan": agent.plan(memory, channel, use_memory, n),
             "llm_context": agent.build_llm_context(context, brief, channel),
         }
+        draft = st.session_state.draft
+        draft["copy"], draft["copy_note"] = None, "Rule-based copy (set ANTHROPIC_API_KEY for Claude)."
+        if llm.available():
+            try:
+                with st.spinner("Claude is writing the variants from memory..."):
+                    draft["copy"] = llm.write_variants(channel, draft["plan"], draft["llm_context"], brand_name)
+                draft["copy_note"] = f"✍️ Written by Claude: {draft['copy']['rationale']}"
+            except Exception as e:  # keep the demo alive
+                draft["copy_note"] = f"Claude call failed, using rule-based copy: {e}"
         st.session_state.pop("last_result", None)
 
     draft = st.session_state.get("draft")
@@ -141,16 +151,18 @@ elif page == "New campaign":
                     st.caption("No learnings yet. This is the first test on this channel.")
             else:
                 st.caption("Memory is OFF, so the agent ignores past learnings.")
-            st.markdown("**Context that will be re-fed to the LLM (future):**")
+            st.markdown("**Context fed to Claude:**")
             st.code(draft["llm_context"], language="text")
 
         p = draft["plan"]
         st.info(f"**Agent reasoning:** {p['reason']}")
+        st.caption(draft.get("copy_note", ""))
         va, vb = st.columns(2)
         for col, key in ((va, "A"), (vb, "B")):
             with col, st.container(border=True):
                 st.subheader(f"Variant {key}" + (" · champion" if key == "A" else " · challenger"))
-                st.markdown(agent.render_copy(channel, p[key], draft["brief"], brand_name))
+                copy = draft.get("copy")
+                st.markdown(copy[key] if copy else agent.render_copy(channel, p[key], draft["brief"], brand_name))
                 st.caption(" · ".join(
                     f"**{k}={v}**" if k == p["tested_dimension"] else f"{k}={v}" for k, v in p[key].items()))
 
