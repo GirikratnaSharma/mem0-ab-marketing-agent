@@ -1,9 +1,11 @@
 """Streamlit dashboard for the Mem0 A/B marketing agent."""
 import json
+import time
 import uuid
 from datetime import datetime
 
 import pandas as pd
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -15,6 +17,9 @@ st.set_page_config(page_title="A/B Marketing Agent · Mem0", page_icon="🧪", l
 
 CAMPAIGNS_PATH = DATA_DIR / "campaigns.json"
 PROFILE_PATH = DATA_DIR / "profiles.json"
+ONBOARD_DIR = DATA_DIR / "business-onboarding"
+WEBSITE_SCRAPE_PATH = ONBOARD_DIR / "website.json"
+INSTAGRAM_SCRAPE_PATH = ONBOARD_DIR / "instagram.json"
 
 
 # ---------------- persistence helpers ----------------
@@ -38,6 +43,193 @@ def save_campaign(c):
 
 def fmt(metric, v):
     return f"{v:,}" if isinstance(v, int) else f"{v:.2%}"
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_image(url):
+    """Fetch an image server-side. Instagram/CDN hosts hotlink-block direct
+    <img src> requests from the browser, so we proxy the bytes through here."""
+    if not url:
+        return None
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        r.raise_for_status()
+        return r.content
+    except Exception:
+        return None
+
+
+# ---------------- onboarding: simulated scrape ----------------
+def run_scrape_animation(website_url, insta_handle):
+    """~30s animated 'scrape' of the site + Instagram. Data is canned fixtures
+    in data/business-onboarding/ (no live scraping), timed to feel live.
+    The progress/status placeholders are cleared at the end; the revealed
+    screenshot and Instagram preview are left on screen (not cleared) and are
+    also redrawn by render_scrape_media() on every later rerun."""
+    insta_handle = (insta_handle or "").lstrip("@").strip()
+    website = load_json(WEBSITE_SCRAPE_PATH, {}).get("data", {})
+    insta_list = load_json(INSTAGRAM_SCRAPE_PATH, [])
+    insta = insta_list[0] if insta_list else {}
+
+    status = st.empty()
+    bar = st.progress(0)
+    shot_area = st.empty()
+
+    for pct, label, pause in [
+        (10, f"🌐 Connecting to {website_url or 'your website'}...", 2.2),
+        (25, "🌐 Fetching homepage & key pages...", 2.2),
+        (40, "🌐 Reading page content & copy...", 2.2),
+        (55, "🎨 Extracting color palette & fonts...", 2.2),
+        (70, "🧬 Detecting logo...", 2.2),
+        (85, "🧠 Analyzing brand personality & tone...", 2.2),
+        (100, "✅ Website scrape complete", 1.0),
+    ]:
+        status.markdown(f"**{label}**")
+        bar.progress(pct)
+        time.sleep(pause)
+    if website.get("screenshot"):
+        with shot_area.container():
+            st.image(website["screenshot"], caption=f"Screenshot · {website_url or 'homepage'}", width=420)
+    time.sleep(1.0)
+
+    status2 = st.empty()
+    bar2 = st.progress(0)
+    insta_area = st.empty()
+    for pct, label, pause in [
+        (15, f"📸 Connecting to Instagram {insta_handle or ''}...", 1.8),
+        (35, "📸 Fetching profile info...", 1.8),
+        (55, "📸 Pulling recent posts...", 1.8),
+        (75, "⬇️ Downloading media...", 1.8),
+        (90, "🔖 Analyzing captions & hashtags...", 1.8),
+        (100, "✅ Instagram scrape complete", 1.0),
+    ]:
+        status2.markdown(f"**{label}**")
+        bar2.progress(pct)
+        time.sleep(pause)
+    if insta:
+        with insta_area.container():
+            render_instagram_preview(insta, insta_handle)
+    time.sleep(1.0)
+
+    final = st.empty()
+    final.markdown("🧠 **Building business profile + brand kit from what we found...**")
+    time.sleep(2.0)
+    final.markdown("✅ **Business profile + brand kit ready.**")
+    time.sleep(0.8)
+    final.empty()
+    status.empty()
+    bar.empty()
+    status2.empty()
+    bar2.empty()
+
+    return build_profile_from_scrape(website_url, insta_handle, website, insta)
+
+
+def render_instagram_preview(insta, insta_handle):
+    h1, h2 = st.columns([1, 5])
+    with h1:
+        pic = fetch_image(insta.get("profilePicUrl"))
+        if pic:
+            st.image(pic, width=64)
+    with h2:
+        st.markdown(f"**@{insta.get('username', insta_handle)}** · "
+                    f"{insta.get('followersCount', 0):,} followers")
+        st.caption(insta.get("biography", ""))
+    posts = insta.get("latestPosts", [])[:6]
+    if posts:
+        cols = st.columns(len(posts))
+        for col, post in zip(cols, posts):
+            with col:
+                shot = fetch_image(post.get("displayUrl"))
+                if shot:
+                    st.image(shot, use_container_width=True)
+
+
+def render_scrape_media(scraped):
+    """Redraws the scraped website screenshot + Instagram preview so they stay
+    visible across reruns (e.g. after clicking Save), not just during the animation."""
+    if scraped.get("screenshot"):
+        st.image(scraped["screenshot"],
+                  caption=f"Screenshot · {scraped.get('website_url') or 'homepage'}", width=420)
+    insta_list = load_json(INSTAGRAM_SCRAPE_PATH, [])
+    insta = insta_list[0] if insta_list else {}
+    if insta:
+        render_instagram_preview(insta, scraped.get("insta_handle", ""))
+
+
+def build_profile_from_scrape(website_url, insta_handle, website, insta):
+    branding = website.get("branding", {})
+    metadata = website.get("metadata", {})
+    personality = branding.get("personality", {})
+    colors = branding.get("colors", {})
+    fonts = branding.get("typography", {}).get("fontFamilies", {})
+    logo = branding.get("images", {}).get("logo") or branding.get("logo")
+
+    brand_name = branding.get("brandName") or (metadata.get("title", "").split("|")[0].strip()) \
+        or insta.get("fullName") or website_url or "Your Business"
+    tone = personality.get("tone", "")
+    energy = personality.get("energy", "")
+    voice = (f"{tone.capitalize()} and {energy}-energy." if tone or energy
+             else "Warm, friendly, on-brand.")
+    biz_type = insta.get("businessCategoryName") or metadata.get("description", "")[:100] or "Small business"
+    audience = personality.get("targetAudience") or "General audience"
+
+    return {
+        "brand_name": brand_name,
+        "voice": voice,
+        "constraints": "Stay on-brand with the detected color palette, fonts, and tone.",
+        "biz_type": biz_type,
+        "audience": audience,
+        "goals": "Grow brand awareness and engagement",
+        "website_url": website_url,
+        "insta_handle": insta_handle,
+        "summary": website.get("summary", ""),
+        "bio": insta.get("biography", ""),
+        "followers": insta.get("followersCount"),
+        "screenshot": website.get("screenshot"),
+        "logo": logo,
+        "colors": colors,
+        "fonts": fonts,
+        "tone": tone,
+        "energy": energy,
+    }
+
+
+def render_brand_kit(scraped):
+    st.subheader("📇 Business profile")
+    p1, p2 = st.columns(2)
+    with p1:
+        st.markdown(f"**Brand name:** {scraped['brand_name']}")
+        st.markdown(f"**Business type:** {scraped['biz_type']}")
+        st.markdown(f"**Audience:** {scraped['audience']}")
+    with p2:
+        st.markdown(f"**Voice:** {scraped['voice']}")
+        if scraped.get("followers") is not None:
+            st.markdown(f"**Instagram:** @{scraped.get('insta_handle', '')} · {scraped['followers']:,} followers")
+    if scraped.get("summary"):
+        st.caption(scraped["summary"])
+    if scraped.get("bio"):
+        st.caption(f"📸 \"{scraped['bio']}\"")
+
+    st.subheader("🎨 Brand kit")
+    k1, k2 = st.columns([1, 3])
+    with k1:
+        if scraped.get("logo"):
+            st.image(scraped["logo"], width=100)
+    with k2:
+        colors = scraped.get("colors") or {}
+        if colors:
+            swatches = "".join(
+                f'<div style="display:inline-block;text-align:center;margin-right:10px">'
+                f'<div style="width:42px;height:42px;border-radius:8px;background:{v};'
+                f'border:1px solid rgba(0,0,0,0.15)"></div>'
+                f'<div style="font-size:11px;margin-top:2px">{k}</div></div>'
+                for k, v in colors.items() if isinstance(v, str) and v.startswith("#")
+            )
+            st.markdown(swatches, unsafe_allow_html=True)
+        fonts = scraped.get("fonts") or {}
+        if fonts:
+            st.caption("Fonts: " + ", ".join(f"{role}: {name}" for role, name in fonts.items()))
 
 
 def run_round(memory, user_id, channel, brief, name, use_memory=True):
@@ -84,27 +276,65 @@ brand_name = profile.get("brand_name", user_id)
 if page == "Onboarding":
     st.header("Onboarding")
     st.caption("Brand and business info are stored in Mem0 and recalled before every campaign.")
-    with st.form("onboarding"):
-        c1, c2 = st.columns(2)
-        with c1:
-            bn = st.text_input("Brand name", value=profile.get("brand_name", "Bean There Coffee"))
-            voice = st.text_area("Brand voice", value=profile.get("voice", "Warm, playful, never pushy. No ALL CAPS."))
-            constraints = st.text_area("Rules / constraints", value=profile.get("constraints", "Max discount 15%. No competitor mentions."))
-        with c2:
-            biz_type = st.text_input("Business type", value=profile.get("biz_type", "Neighborhood coffee shop + online bean subscriptions"))
-            audience = st.text_area("Target audience", value=profile.get("audience", "Young professionals 22-35 in SF, remote workers"))
-            goals = st.text_area("Marketing goals", value=profile.get("goals", "Grow subscriptions, bring lapsed customers back"))
-        submitted = st.form_submit_button("Save to memory", type="primary")
-    if submitted:
-        new = {"brand_name": bn, "voice": voice, "constraints": constraints,
-               "biz_type": biz_type, "audience": audience, "goals": goals}
-        profiles[user_id] = new
-        save_json(PROFILE_PATH, profiles)
-        memory.add(f"Brand: {bn}. Voice: {voice}. Rules: {constraints}",
-                   {"kind": "brand", "section": "brand_info"}, infer=True)
-        memory.add(f"Business: {biz_type}. Audience: {audience}. Goals: {goals}",
-                   {"kind": "brand", "section": "business_info"}, infer=True)
-        st.success("Saved brand info + business info to memory.")
+
+    st.subheader("🔎 Auto-fill from your website + Instagram")
+    c1, c2, c3 = st.columns([2, 2, 1])
+    with c1:
+        website_url = st.text_input("Website URL", placeholder="https://yourbusiness.com")
+    with c2:
+        insta_handle = st.text_input("Instagram handle", placeholder="@yourbusiness")
+    with c3:
+        st.write("")
+        st.write("")
+        go = st.button("Go 🚀", type="primary", use_container_width=True)
+
+    if go:
+        st.session_state.scraped_profile = run_scrape_animation(website_url, insta_handle)
+        st.rerun()
+
+    scraped = st.session_state.get("scraped_profile")
+    if scraped:
+        with st.container(border=True):
+            render_scrape_media(scraped)
+            st.divider()
+            render_brand_kit(scraped)
+            if st.button("✅ Save this profile to memory", type="primary"):
+                new = {"brand_name": scraped["brand_name"], "voice": scraped["voice"],
+                       "constraints": scraped["constraints"], "biz_type": scraped["biz_type"],
+                       "audience": scraped["audience"], "goals": scraped["goals"],
+                       "logo": scraped.get("logo"), "colors": scraped.get("colors"),
+                       "fonts": scraped.get("fonts"), "website_url": scraped.get("website_url"),
+                       "insta_handle": scraped.get("insta_handle")}
+                profiles[user_id] = new
+                save_json(PROFILE_PATH, profiles)
+                memory.add(f"Brand: {new['brand_name']}. Voice: {new['voice']}. Rules: {new['constraints']}",
+                           {"kind": "brand", "section": "brand_info"}, infer=True)
+                memory.add(f"Business: {new['biz_type']}. Audience: {new['audience']}. Goals: {new['goals']}",
+                           {"kind": "brand", "section": "business_info"}, infer=True)
+                st.success("Saved brand info + business info to memory.")
+
+    with st.expander("Or enter manually", expanded=not scraped):
+        with st.form("onboarding"):
+            c1, c2 = st.columns(2)
+            with c1:
+                bn = st.text_input("Brand name", value=profile.get("brand_name", "Bean There Coffee"))
+                voice = st.text_area("Brand voice", value=profile.get("voice", "Warm, playful, never pushy. No ALL CAPS."))
+                constraints = st.text_area("Rules / constraints", value=profile.get("constraints", "Max discount 15%. No competitor mentions."))
+            with c2:
+                biz_type = st.text_input("Business type", value=profile.get("biz_type", "Neighborhood coffee shop + online bean subscriptions"))
+                audience = st.text_area("Target audience", value=profile.get("audience", "Young professionals 22-35 in SF, remote workers"))
+                goals = st.text_area("Marketing goals", value=profile.get("goals", "Grow subscriptions, bring lapsed customers back"))
+            submitted = st.form_submit_button("Save to memory", type="primary")
+        if submitted:
+            new = {"brand_name": bn, "voice": voice, "constraints": constraints,
+                   "biz_type": biz_type, "audience": audience, "goals": goals}
+            profiles[user_id] = new
+            save_json(PROFILE_PATH, profiles)
+            memory.add(f"Brand: {bn}. Voice: {voice}. Rules: {constraints}",
+                       {"kind": "brand", "section": "brand_info"}, infer=True)
+            memory.add(f"Business: {biz_type}. Audience: {audience}. Goals: {goals}",
+                       {"kind": "brand", "section": "business_info"}, infer=True)
+            st.success("Saved brand info + business info to memory.")
 
 # ---------------- New campaign ----------------
 elif page == "New campaign":
