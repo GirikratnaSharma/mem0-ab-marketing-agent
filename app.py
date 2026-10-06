@@ -313,29 +313,6 @@ if page == "Onboarding":
                            {"kind": "brand", "section": "business_info"}, infer=True)
                 st.success("Saved brand info + business info to memory.")
 
-    with st.expander("Or enter manually", expanded=not scraped):
-        with st.form("onboarding"):
-            c1, c2 = st.columns(2)
-            with c1:
-                bn = st.text_input("Brand name", value=profile.get("brand_name", "Bean There Coffee"))
-                voice = st.text_area("Brand voice", value=profile.get("voice", "Warm, playful, never pushy. No ALL CAPS."))
-                constraints = st.text_area("Rules / constraints", value=profile.get("constraints", "Max discount 15%. No competitor mentions."))
-            with c2:
-                biz_type = st.text_input("Business type", value=profile.get("biz_type", "Neighborhood coffee shop + online bean subscriptions"))
-                audience = st.text_area("Target audience", value=profile.get("audience", "Young professionals 22-35 in SF, remote workers"))
-                goals = st.text_area("Marketing goals", value=profile.get("goals", "Grow subscriptions, bring lapsed customers back"))
-            submitted = st.form_submit_button("Save to memory", type="primary")
-        if submitted:
-            new = {"brand_name": bn, "voice": voice, "constraints": constraints,
-                   "biz_type": biz_type, "audience": audience, "goals": goals}
-            profiles[user_id] = new
-            save_json(PROFILE_PATH, profiles)
-            memory.add(f"Brand: {bn}. Voice: {voice}. Rules: {constraints}",
-                       {"kind": "brand", "section": "brand_info"}, infer=True)
-            memory.add(f"Business: {biz_type}. Audience: {audience}. Goals: {goals}",
-                       {"kind": "brand", "section": "business_info"}, infer=True)
-            st.success("Saved brand info + business info to memory.")
-
 # ---------------- New campaign ----------------
 elif page == "New campaign":
     st.header("New campaign")
