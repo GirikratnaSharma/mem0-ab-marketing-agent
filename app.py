@@ -243,6 +243,24 @@ def build_profile_from_scrape(website_url, insta_handle, website, insta):
     }
 
 
+def save_profile_to_memory(memory, user_id, profiles, scraped):
+    """Writes the scraped profile to the local profile store and to Mem0,
+    called right after the scrape animation finishes (no extra click needed)."""
+    new = {"brand_name": scraped["brand_name"], "voice": scraped["voice"],
+           "constraints": scraped["constraints"], "biz_type": scraped["biz_type"],
+           "audience": scraped["audience"], "goals": scraped["goals"],
+           "logo": scraped.get("logo"), "colors": scraped.get("colors"),
+           "fonts": scraped.get("fonts"), "website_url": scraped.get("website_url"),
+           "insta_handle": scraped.get("insta_handle")}
+    profiles[user_id] = new
+    save_json(PROFILE_PATH, profiles)
+    memory.add(f"Brand: {new['brand_name']}. Voice: {new['voice']}. Rules: {new['constraints']}",
+               {"kind": "brand", "section": "brand_info"}, infer=True)
+    memory.add(f"Business: {new['biz_type']}. Audience: {new['audience']}. Goals: {new['goals']}",
+               {"kind": "brand", "section": "business_info"}, infer=True)
+    return new
+
+
 def render_brand_kit(scraped):
     st.subheader("📇 Business profile")
     p1, p2 = st.columns(2)
@@ -328,7 +346,9 @@ if page == "Onboarding":
         go = st.button("Go 🚀", type="primary", use_container_width=True)
 
     if go:
-        st.session_state.scraped_profile = run_scrape_animation(website_url, insta_handle)
+        scraped = run_scrape_animation(website_url, insta_handle)
+        save_profile_to_memory(memory, user_id, profiles, scraped)
+        st.session_state.scraped_profile = scraped
         st.rerun()
 
     scraped = st.session_state.get("scraped_profile")
@@ -337,20 +357,7 @@ if page == "Onboarding":
             render_scrape_media(scraped)
             st.divider()
             render_brand_kit(scraped)
-            if st.button("✅ Save this profile to memory", type="primary"):
-                new = {"brand_name": scraped["brand_name"], "voice": scraped["voice"],
-                       "constraints": scraped["constraints"], "biz_type": scraped["biz_type"],
-                       "audience": scraped["audience"], "goals": scraped["goals"],
-                       "logo": scraped.get("logo"), "colors": scraped.get("colors"),
-                       "fonts": scraped.get("fonts"), "website_url": scraped.get("website_url"),
-                       "insta_handle": scraped.get("insta_handle")}
-                profiles[user_id] = new
-                save_json(PROFILE_PATH, profiles)
-                memory.add(f"Brand: {new['brand_name']}. Voice: {new['voice']}. Rules: {new['constraints']}",
-                           {"kind": "brand", "section": "brand_info"}, infer=True)
-                memory.add(f"Business: {new['biz_type']}. Audience: {new['audience']}. Goals: {new['goals']}",
-                           {"kind": "brand", "section": "business_info"}, infer=True)
-                st.success("Saved brand info + business info to memory.")
+            st.success("Saved brand info + business info to memory.")
 
 # ---------------- New campaign ----------------
 elif page == "New campaign":
