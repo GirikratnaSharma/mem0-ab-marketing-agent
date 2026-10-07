@@ -1,532 +1,633 @@
-"""Streamlit dashboard for the Mem0 A/B marketing agent."""
-import json
-import time
-import uuid
-from datetime import datetime
+"""Streamlit app for the Mem0 A/B marketing agent."""
+import html
 
+import altair as alt
 import pandas as pd
-import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-import agent
-from memory_store import DATA_DIR, MemoryStore
-
 load_dotenv()
-st.set_page_config(page_title="A/B Marketing Agent · Mem0", page_icon="🧪", layout="wide")
 
-CAMPAIGNS_PATH = DATA_DIR / "campaigns.json"
-PROFILE_PATH = DATA_DIR / "profiles.json"
-ONBOARD_DIR = DATA_DIR / "business-onboarding"
-WEBSITE_SCRAPE_PATH = ONBOARD_DIR / "website.json"
-INSTAGRAM_SCRAPE_PATH = ONBOARD_DIR / "instagram.json"
+import agent  # noqa: E402
+import onboarding  # noqa: E402
+import strategist  # noqa: E402
+import ui  # noqa: E402
+from campaigns import (PROFILE_PATH, campaigns_for, clear_drafts, delete_campaigns, load_draft,  # noqa: E402
+                       load_json, next_round, run_round, save_draft, save_json)
+from memory_store import MemoryStore  # noqa: E402
 
+st.set_page_config(page_title="Campaign Lab", page_icon=":material/science:", layout="wide")
+ui.inject_css()
 
-# ---------------- persistence helpers ----------------
-def load_json(path, default):
-    return json.loads(path.read_text()) if path.exists() else default
+DEFAULT_BRIEF = "Fall session enrollment: free trial class for new students"
+CHANNEL_LABELS = {"email": ":material/mail: Email", "instagram": ":material/photo_camera: Instagram"}
+CHANNEL_NAMES = {"email": "email", "instagram": "Instagram"}
+SIM_NOTE = "Simulated audience: nothing is sent to your customers."
+INK, MUTED, ACCENT = "#1C1A17", "#B9AFA1", "#C99A00"
 
-
-def save_json(path, data):
-    path.write_text(json.dumps(data, indent=2))
-
-
-def campaigns_for(user_id):
-    return [c for c in load_json(CAMPAIGNS_PATH, []) if c["user_id"] == user_id]
-
-
-def save_campaign(c):
-    data = load_json(CAMPAIGNS_PATH, [])
-    data.append(c)
-    save_json(CAMPAIGNS_PATH, data)
-
-
-def fmt(metric, v):
-    return f"{v:,}" if isinstance(v, int) else f"{v:.2%}"
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_image(url):
-    """Fetch an image server-side. Instagram/CDN hosts hotlink-block direct
-    <img src> requests from the browser, so we proxy the bytes through here."""
-    if not url:
-        return None
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-        r.raise_for_status()
-        return r.content
-    except Exception:
-        return None
-
-
-# ---------------- onboarding: simulated scrape ----------------
-def render_color_swatches(colors):
-    swatches = "".join(
-        f'<div style="display:inline-block;text-align:center;margin-right:10px">'
-        f'<div style="width:42px;height:42px;border-radius:8px;background:{v};'
-        f'border:1px solid rgba(0,0,0,0.15)"></div>'
-        f'<div style="font-size:11px;margin-top:2px">{k}</div></div>'
-        for k, v in colors.items() if isinstance(v, str) and v.startswith("#")
-    )
-    if swatches:
-        st.markdown(swatches, unsafe_allow_html=True)
-
-
-def run_scrape_animation(website_url, insta_handle):
-    """~30s animated 'scrape' of the site + Instagram. Data is canned fixtures
-    in data/business-onboarding/ (no live scraping), timed to feel live.
-    Each discovery (screenshot, colors, logo, profile, posts) is revealed the
-    moment its step completes rather than all at once at the end. The
-    progress/status placeholders are cleared when done; the revealed content
-    is left on screen and is also redrawn by render_scrape_media() on every
-    later rerun."""
-    insta_handle = (insta_handle or "").lstrip("@").strip()
-    website = load_json(WEBSITE_SCRAPE_PATH, {}).get("data", {})
-    insta_list = load_json(INSTAGRAM_SCRAPE_PATH, [])
-    insta = insta_list[0] if insta_list else {}
-    branding = website.get("branding", {})
-    logo = branding.get("images", {}).get("logo") or branding.get("logo")
-
-    status = st.empty()
-    bar = st.progress(0)
-    shot_area = st.empty()
-    colors_area = st.empty()
-    logo_area = st.empty()
-
-    for pct, label, pause, reveal in [
-        (10, f"🌐 Connecting to {website_url or 'your website'}...", 2.0, None),
-        (25, "🌐 Fetching homepage & key pages...", 2.0, "screenshot"),
-        (40, "🌐 Reading page content & copy...", 2.0, None),
-        (60, "🎨 Extracting color palette & fonts...", 2.2, "colors"),
-        (80, "🧬 Detecting logo...", 2.2, "logo"),
-        (92, "🧠 Analyzing brand personality & tone...", 2.0, None),
-        (100, "✅ Website scrape complete", 1.0, None),
-    ]:
-        status.markdown(f"**{label}**")
-        bar.progress(pct)
-        time.sleep(pause)
-        if reveal == "screenshot" and website.get("screenshot"):
-            with shot_area.container():
-                st.image(website["screenshot"], caption=f"Screenshot · {website_url or 'homepage'}", width=420)
-        elif reveal == "colors" and branding.get("colors"):
-            with colors_area.container():
-                st.caption("Detected palette")
-                render_color_swatches(branding["colors"])
-        elif reveal == "logo" and logo:
-            with logo_area.container():
-                st.image(logo, width=90, caption="Logo")
-    time.sleep(1.0)
-
-    status2 = st.empty()
-    bar2 = st.progress(0)
-    insta_header_area = st.empty()
-    insta_posts_area = st.empty()
-    posts = insta.get("latestPosts", [])[:6]
-    for pct, label, pause, reveal in [
-        (15, f"📸 Connecting to Instagram {insta_handle or ''}...", 1.8, None),
-        (35, "📸 Fetching profile info...", 1.8, "header"),
-        (55, "📸 Pulling recent posts...", 0, "posts"),
-        (75, "⬇️ Downloading media...", 1.6, None),
-        (90, "🔖 Analyzing captions & hashtags...", 1.6, None),
-        (100, "✅ Instagram scrape complete", 1.0, None),
-    ]:
-        status2.markdown(f"**{label}**")
-        bar2.progress(pct)
-        if reveal == "header" and insta:
-            time.sleep(pause)
-            with insta_header_area.container():
-                render_instagram_header(insta, insta_handle)
-        elif reveal == "posts" and posts:
-            reveal_posts_progressively(insta_posts_area, posts)
-        else:
-            time.sleep(pause)
-    time.sleep(1.0)
-
-    final = st.empty()
-    final.markdown("🧠 **Building business profile + brand kit from what we found...**")
-    time.sleep(2.0)
-    final.markdown("✅ **Business profile + brand kit ready.**")
-    time.sleep(0.8)
-    final.empty()
-    status.empty()
-    bar.empty()
-    status2.empty()
-    bar2.empty()
-
-    return build_profile_from_scrape(website_url, insta_handle, website, insta)
-
-
-def render_instagram_header(insta, insta_handle):
-    h1, h2 = st.columns([1, 5])
-    with h1:
-        pic = fetch_image(insta.get("profilePicUrl"))
-        if pic:
-            st.image(pic, width=64)
-    with h2:
-        st.markdown(f"**@{insta.get('username', insta_handle)}** · "
-                    f"{insta.get('followersCount', 0):,} followers")
-        st.caption(insta.get("biography", ""))
-
-
-def reveal_posts_progressively(area, posts, per_image_pause=0.4):
-    shots = []
-    for post in posts:
-        shots.append(fetch_image(post.get("displayUrl")))
-        with area.container():
-            cols = st.columns(len(posts))
-            for col, shot in zip(cols, shots):
-                with col:
-                    if shot:
-                        st.image(shot, use_container_width=True)
-        time.sleep(per_image_pause)
-
-
-def render_instagram_preview(insta, insta_handle):
-    render_instagram_header(insta, insta_handle)
-    posts = insta.get("latestPosts", [])[:6]
-    if posts:
-        cols = st.columns(len(posts))
-        for col, post in zip(cols, posts):
-            with col:
-                shot = fetch_image(post.get("displayUrl"))
-                if shot:
-                    st.image(shot, use_container_width=True)
-
-
-def render_scrape_media(scraped):
-    """Redraws the scraped website screenshot + Instagram preview so they stay
-    visible across reruns (e.g. after clicking Save), not just during the animation."""
-    if scraped.get("screenshot"):
-        st.image(scraped["screenshot"],
-                  caption=f"Screenshot · {scraped.get('website_url') or 'homepage'}", width=420)
-    insta_list = load_json(INSTAGRAM_SCRAPE_PATH, [])
-    insta = insta_list[0] if insta_list else {}
-    if insta:
-        render_instagram_preview(insta, scraped.get("insta_handle", ""))
-
-
-def build_profile_from_scrape(website_url, insta_handle, website, insta):
-    branding = website.get("branding", {})
-    metadata = website.get("metadata", {})
-    personality = branding.get("personality", {})
-    colors = branding.get("colors", {})
-    fonts = branding.get("typography", {}).get("fontFamilies", {})
-    logo = branding.get("images", {}).get("logo") or branding.get("logo")
-
-    brand_name = branding.get("brandName") or (metadata.get("title", "").split("|")[0].strip()) \
-        or insta.get("fullName") or website_url or "Your Business"
-    tone = personality.get("tone", "")
-    energy = personality.get("energy", "")
-    voice = (f"{tone.capitalize()} and {energy}-energy." if tone or energy
-             else "Warm, friendly, on-brand.")
-    biz_type = insta.get("businessCategoryName") or metadata.get("description", "")[:100] or "Small business"
-    audience = personality.get("targetAudience") or "General audience"
-
-    return {
-        "brand_name": brand_name,
-        "voice": voice,
-        "constraints": "Stay on-brand with the detected color palette, fonts, and tone.",
-        "biz_type": biz_type,
-        "audience": audience,
-        "goals": "Grow brand awareness and engagement",
-        "website_url": website_url,
-        "insta_handle": insta_handle,
-        "summary": website.get("summary", ""),
-        "bio": insta.get("biography", ""),
-        "followers": insta.get("followersCount"),
-        "screenshot": website.get("screenshot"),
-        "logo": logo,
-        "colors": colors,
-        "fonts": fonts,
-        "tone": tone,
-        "energy": energy,
-    }
-
-
-def save_profile_to_memory(memory, user_id, profiles, scraped):
-    """Writes the scraped profile to the local profile store and to Mem0,
-    called right after the scrape animation finishes (no extra click needed)."""
-    new = {"brand_name": scraped["brand_name"], "voice": scraped["voice"],
-           "constraints": scraped["constraints"], "biz_type": scraped["biz_type"],
-           "audience": scraped["audience"], "goals": scraped["goals"],
-           "logo": scraped.get("logo"), "colors": scraped.get("colors"),
-           "fonts": scraped.get("fonts"), "website_url": scraped.get("website_url"),
-           "insta_handle": scraped.get("insta_handle")}
-    profiles[user_id] = new
-    save_json(PROFILE_PATH, profiles)
-    memory.add(f"Brand: {new['brand_name']}. Voice: {new['voice']}. Rules: {new['constraints']}",
-               {"kind": "brand", "section": "brand_info"}, infer=True)
-    memory.add(f"Business: {new['biz_type']}. Audience: {new['audience']}. Goals: {new['goals']}",
-               {"kind": "brand", "section": "business_info"}, infer=True)
-    return new
-
-
-def render_brand_kit(scraped):
-    st.subheader("📇 Business profile")
-    p1, p2 = st.columns(2)
-    with p1:
-        st.markdown(f"**Brand name:** {scraped['brand_name']}")
-        st.markdown(f"**Business type:** {scraped['biz_type']}")
-        st.markdown(f"**Audience:** {scraped['audience']}")
-    with p2:
-        st.markdown(f"**Voice:** {scraped['voice']}")
-        if scraped.get("followers") is not None:
-            st.markdown(f"**Instagram:** @{scraped.get('insta_handle', '')} · {scraped['followers']:,} followers")
-    if scraped.get("summary"):
-        st.caption(scraped["summary"])
-    if scraped.get("bio"):
-        st.caption(f"📸 \"{scraped['bio']}\"")
-
-    st.subheader("🎨 Brand kit")
-    k1, k2 = st.columns([1, 3])
-    with k1:
-        if scraped.get("logo"):
-            st.image(scraped["logo"], width=100)
-    with k2:
-        render_color_swatches(scraped.get("colors") or {})
-        fonts = scraped.get("fonts") or {}
-        if fonts:
-            st.caption("Fonts: " + ", ".join(f"{role}: {name}" for role, name in fonts.items()))
-
-
-def run_round(memory, user_id, channel, brief, name, use_memory=True):
-    """One full agent loop: recall -> plan -> simulate -> learn. Returns the saved campaign."""
-    round_no = len([c for c in campaigns_for(user_id) if c["channel"] == channel]) + 1
-    context = agent.recall(memory, channel, brief)
-    p = agent.plan(memory, channel, use_memory, round_no)
-    results = {k: agent.simulate(channel, p[k], f"{user_id}-{channel}-{round_no}-{k}") for k in ("A", "B")}
-    outcome = agent.learn(memory, channel, p, results, name)
-    primary = agent.CHANNELS[channel]["primary"]
-    c = {
-        "id": str(uuid.uuid4())[:8], "user_id": user_id, "name": name, "channel": channel,
-        "brief": brief, "round": round_no, "plan": p, "results": results,
-        "winner": outcome["winner"], "lift": outcome["lift"], "learning": outcome["learning"],
-        "primary": primary, "winner_score": results[outcome["winner"]][primary],
-        "memories_used": len(context["learnings"]), "use_memory": use_memory,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    save_campaign(c)
-    return c, context
-
-
-# ---------------- sidebar ----------------
-with st.sidebar:
-    st.title("🧪 A/B Marketing Agent")
-    st.caption("Learns what works across campaigns with Mem0")
-    user_id = st.text_input("Business ID", value="demo-coffee-co")
-    memory = MemoryStore(user_id)
-    st.markdown(f"**Memory backend:** {memory.backend}")
-    if memory.last_error:
-        st.warning(memory.last_error)
-    page = st.radio("Go to", ["Dashboard", "New campaign", "Onboarding", "Memory"])
-    st.divider()
-    if st.button("Reset this business", type="secondary"):
-        memory.reset()
-        save_json(CAMPAIGNS_PATH, [c for c in load_json(CAMPAIGNS_PATH, []) if c["user_id"] != user_id])
-        st.rerun()
-
+# ---------------- workspace ----------------
+if "user_id" not in st.session_state:
+    st.session_state.user_id = "kung-fu-kids"
+user_id = st.session_state.user_id
+memory = MemoryStore(user_id)
 profiles = load_json(PROFILE_PATH, {})
 profile = profiles.get(user_id, {})
-brand_name = profile.get("brand_name", user_id)
+brand_name = profile.get("brand_name") or user_id.replace("-", " ").title()
+llm_ok, llm_label = st.cache_data(ttl=600, show_spinner=False)(strategist.llm_status)()
 
-# ---------------- Onboarding ----------------
-if page == "Onboarding":
-    st.header("Onboarding")
-    st.caption("Brand and business info are stored in Mem0 and recalled before every campaign.")
 
-    st.subheader("🔎 Auto-fill from your website + Instagram")
-    c1, c2, c3 = st.columns([2, 2, 1])
-    with c1:
-        website_url = st.text_input("Website URL", value="https://kungfukids.com")
-    with c2:
-        insta_handle = st.text_input("Instagram handle", value="@wushucentral")
-    with c3:
-        st.write("")
-        st.write("")
-        go = st.button("Go 🚀", type="primary", use_container_width=True)
+def clear_flow():
+    clear_drafts(user_id)
+    st.session_state.pop("last_result", None)
 
-    if go:
-        scraped = run_scrape_animation(website_url, insta_handle)
-        save_profile_to_memory(memory, user_id, profiles, scraped)
-        st.session_state.scraped_profile = scraped
-        st.rerun()
 
-    scraped = st.session_state.get("scraped_profile")
-    if scraped:
-        with st.container(border=True):
-            render_scrape_media(scraped)
-            st.divider()
-            render_brand_kit(scraped)
-            st.success("Saved brand info + business info to memory.")
+def sidebar():
+    with st.sidebar:
+        logo = profile.get("logo")
+        img = (f'<img src="{html.escape(logo)}" alt="{html.escape(brand_name)} logo" width="44" height="44" '
+               f'style="border-radius:50%;background:#fff;border:1px solid #E4DCCF">') if logo else ""
+        st.markdown(f'<div style="display:flex;gap:12px;align-items:center">{img}<div>'
+                    f'<b>{html.escape(brand_name)}</b><br><span class="muted">Campaign Lab</span></div></div>',
+                    unsafe_allow_html=True)
+        st.markdown(ui.tag("Memory: Mem0" if memory.client else "Memory: on this computer",
+                           "ok" if memory.client else "")
+                    + ui.tag("AI writer: on" if llm_ok else "AI writer: offline", "ok" if llm_ok else "warn"),
+                    unsafe_allow_html=True)
+        st.divider()
+        with st.expander("Workspace", icon=":material/settings:"):
+            new_id = st.text_input("Business ID", value=user_id,
+                                   help="Each business has its own memory and test history.")
+            if new_id.strip() and new_id != user_id:
+                st.session_state.user_id = new_id.strip()
+                st.session_state.pop("last_result", None)
+                st.rerun()
+            st.caption(f"AI writer: {llm_label}")
+            if st.session_state.get("llm_error"):
+                st.caption(f"Last AI error: {st.session_state.llm_error}")
+            if memory.last_error:
+                st.caption(f"Memory error: {memory.last_error}")
+            if st.button("Reset this business", type="secondary", width="stretch",
+                         help="Deletes this business's tests, brand and memories."):
+                memory.reset()
+                delete_campaigns(user_id)
+                clear_flow()
+                profiles.pop(user_id, None)
+                save_json(PROFILE_PATH, profiles)
+                st.rerun()
 
-# ---------------- New campaign ----------------
-elif page == "New campaign":
-    st.header("New campaign")
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        brief = st.text_input("Campaign brief", value="Fall pumpkin spice cold brew launch")
-    with c2:
-        channel = st.selectbox("Channel", ["email", "instagram"])
-    with c3:
-        use_memory = st.toggle("Use memory", value=True)
-    n = len([c for c in campaigns_for(user_id) if c["channel"] == channel]) + 1
-    name = st.text_input("Campaign name", value=f"{channel.title()} #{n}: {brief}")
 
-    if st.button("1 · Recall memory & generate A/B variants", type="primary"):
-        context = agent.recall(memory, channel, brief)
-        st.session_state.draft = {
-            "context": context, "channel": channel, "brief": brief, "name": name,
-            "use_memory": use_memory,
-            "plan": agent.plan(memory, channel, use_memory, n),
-            "llm_context": agent.build_llm_context(context, brief, channel),
-        }
-        st.session_state.pop("last_result", None)
+def go(page):
+    st.switch_page(PAGES[page])
 
-    draft = st.session_state.get("draft")
-    if draft and draft["channel"] == channel:
-        ctx = draft["context"]
-        with st.expander(f"🧠 Recalled from memory: {len(ctx['learnings'])} learnings, "
-                         f"{len(ctx['brand'])} brand facts", expanded=True):
-            if draft["use_memory"]:
-                for m in ctx["learnings"][:6]:
-                    st.markdown(f"- {m['memory']}")
-                if not ctx["learnings"]:
-                    st.caption("No learnings yet. This is the first test on this channel.")
-            else:
-                st.caption("Memory is OFF, so the agent ignores past learnings.")
-            st.markdown("**Context that will be re-fed to the LLM (future):**")
-            st.code(draft["llm_context"], language="text")
 
-        p = draft["plan"]
-        st.info(f"**Agent reasoning:** {p['reason']}")
-        va, vb = st.columns(2)
-        for col, key in ((va, "A"), (vb, "B")):
-            with col, st.container(border=True):
-                st.subheader(f"Variant {key}" + (" · champion" if key == "A" else " · challenger"))
-                st.markdown(agent.render_copy(channel, p[key], draft["brief"], brand_name))
-                st.caption(" · ".join(
-                    f"**{k}={v}**" if k == p["tested_dimension"] else f"{k}={v}" for k, v in p[key].items()))
+def load_sample_data():
+    """A filled-in demo: the Kung Fu Kids brand plus simulated email and Instagram history."""
+    with st.spinner("Loading the sample business and running simulated tests..."):
+        if not profile:
+            w = load_json(onboarding.WEBSITE_SCRAPE_PATH, {}).get("data", {})
+            ig = (load_json(onboarding.INSTAGRAM_SCRAPE_PATH, []) or [{}])[0]
+            onboarding.save_profile_to_memory(memory, user_id, profiles, onboarding.build_profile_from_scrape(
+                "https://kungfukids.com", "@wushucentral", w, ig))
+        for channel, n in (("email", 5), ("instagram", 3)):
+            for _ in range(n):
+                run_round(memory, user_id, channel, DEFAULT_BRIEF,
+                          f"{channel.title()} #{next_round(user_id, channel)}: {agent.short_topic(DEFAULT_BRIEF)}")
+    st.toast("Sample data loaded", icon=":material/check:")
 
-        if st.button("2 · Run A/B test (simulated audience) & write learning to memory"):
-            c, _ = run_round(memory, user_id, channel, draft["brief"], draft["name"], draft["use_memory"])
-            st.session_state.last_result = c
-            st.session_state.pop("draft", None)
+
+# ---------------- Home ----------------
+def home_page():
+    camps = campaigns_for(user_id)
+    steps = [
+        ("brand", "Set up your brand",
+         "Import your website and Instagram so every version sounds like you. Takes about 30 seconds.",
+         bool(profile), "Set up your brand"),
+        ("create", "Run your first test",
+         "Describe what you're promoting. Campaign Lab suggests one change, writes versions A and B, "
+         "and scores them with a simulated audience.", len(camps) >= 1, "Run your first test"),
+        ("create", "Run a follow-up test",
+         "Version A now starts from the winner. Test one more idea and watch the playbook grow.",
+         len(camps) >= 2, "Run a follow-up test"),
+    ]
+    if all(done for *_, done, _ in steps):
+        return home_returning(camps)
+
+    ui.page_header("Welcome to Campaign Lab",
+                   "Test one idea at a time, keep what wins, and let every email and Instagram post "
+                   "start from what worked last time.")
+    st.markdown('<p class="lede">Three steps to your first lesson.</p>', unsafe_allow_html=True)
+    current = next(i for i, (*_, done, _) in enumerate(steps) if not done)
+    st.markdown('<div class="journey"></div>', unsafe_allow_html=True)
+    for i, (page, title, desc, done, cta) in enumerate(steps):
+        state = "done" if done else "current" if i == current else "later"
+        left, right = st.columns([5, 1.6], vertical_alignment="center")
+        with left:
+            ui.journey_step(i + 1, title, desc, state)
+        if state == "current":
+            if right.button(cta, type="primary", icon=":material/arrow_forward:", width="stretch", key=f"j{i}"):
+                go(page)
+        elif state == "done" and page == "brand":
+            if right.button("View brand", key=f"j{i}", width="stretch"):
+                go(page)
+        st.markdown('<div class="jrule"></div>', unsafe_allow_html=True)
+
+    st.write("")
+    with st.container(border=True):
+        c1, c2 = st.columns([5, 1.6], vertical_alignment="center")
+        c1.markdown("**Just looking around?** Load a sample business (Kung Fu Kids) with 8 simulated tests "
+                    "to see a full history. You can clear it later in Workspace.")
+        if c2.button("Load sample data", icon=":material/dataset:", width="stretch"):
+            load_sample_data()
             st.rerun()
 
-    res = st.session_state.get("last_result")
-    if res:
-        st.success(f"Variant {res['winner']} won (+{res['lift']:.0%} {res['primary']}). Learning saved to memory.")
-        cols = st.columns(len(res["results"]["A"]))
-        for col, metric in zip(cols, res["results"]["A"]):
-            a, b = res["results"]["A"][metric], res["results"]["B"][metric]
-            col.metric(f"{metric} (B vs A)", fmt(metric, b), f"{(b - a) / a:+.1%}")
-        st.markdown(f"🧠 **Written to memory:** {res['learning']}")
 
-# ---------------- Memory ----------------
-elif page == "Memory":
-    st.header("Agent memory")
-    st.caption(f"Everything the agent remembers for `{user_id}` · backend: {memory.backend}")
-    q = st.text_input("Search memory", placeholder="e.g. what subject lines work for email?")
-    if q:
-        for r in memory.search(q):
-            st.markdown(f"- {r['memory']}  \n  <small>{r['source']} · {r['metadata']}</small>",
-                        unsafe_allow_html=True)
-    items = memory.all()
-    if items:
-        df = pd.DataFrame([{"kind": m["metadata"].get("kind"), "channel": m["metadata"].get("channel", ""),
-                            "memory": m["memory"], "mem0": "✅" if m["synced_to_mem0"] else "local",
-                            "created": m["created_at"]} for m in reversed(items)])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No memories yet. Start with Onboarding.")
+def home_returning(camps):
+    ui.page_header(f"Welcome back, {brand_name}", "Here's where you left off.")
+    learnings = memory.all(kind="learning")
+    last = camps[-1]
+    with st.container(border=True):
+        st.markdown(f'<p class="lede">Your next test starts from {len(learnings)} '
+                    f'lesson{"s" if len(learnings) != 1 else ""}.</p>'
+                    f'<div class="muted" style="margin-bottom:6px">Last result · {ui.esc(last["name"])}: '
+                    f'{ui.esc(result_phrase(last))}.</div>', unsafe_allow_html=True)
+        for ch in ("email", "instagram"):
+            if any(m["metadata"].get("channel") == ch for m in learnings):
+                ui.playbook_strip(learnings, ch)
+        b1, b2, b3, _ = st.columns([1.3, 1.1, 1.1, 2])
+        if b1.button("Run your next test", type="primary", icon=":material/science:", width="stretch"):
+            go("create")
+        if b2.button("See results", icon=":material/insights:", width="stretch"):
+            go("results")
+        if b3.button("View last result", icon=":material/history:", width="stretch"):
+            st.session_state.last_result = last
+            go("create")
+    st.write("")
+    with st.expander("How Campaign Lab works", icon=":material/help:"):
+        st.markdown(
+            "1. **Your brand** is saved to memory so every version sounds like you.\n"
+            "2. **Each test** keeps what already won (version A) and changes one thing (version B).\n"
+            "3. **A simulated audience** scores both. Nothing is sent to real customers yet.\n"
+            "4. **The lesson is saved**, and the next test starts from the winner. That's the playbook.")
 
-# ---------------- Dashboard ----------------
-else:
-    st.header(f"Dashboard · {brand_name}")
+
+# ---------------- Results ----------------
+def performance_chart(camps, channel):
+    primary = agent.CHANNELS[channel]["primary"]
+    rows = []
+    for c in camps:
+        rows += [{"test": c["round"], "series": "Best of the two", "value": c["winner_score"], "name": c["name"]},
+                 {"test": c["round"], "series": "A", "value": c["results"]["A"][primary], "name": c["name"]},
+                 {"test": c["round"], "series": "B", "value": c["results"]["B"][primary], "name": c["name"]}]
+    color = alt.Color("series:N", scale=alt.Scale(domain=["Best of the two", "A", "B"], range=[INK, MUTED, ACCENT]),
+                      legend=alt.Legend(orient="top", title=None))
+    base = alt.Chart(pd.DataFrame(rows)).encode(
+        x=alt.X("test:O", title="Test #", axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("value:Q", title=ui.metric_label(primary), axis=alt.Axis(format="%")),
+        color=color, tooltip=["name", "series", alt.Tooltip("value:Q", format=".2%")])
+    chart = (base.mark_line(strokeWidth=2.5).transform_filter("datum.series == 'Best of the two'")
+             + base.mark_point(filled=True, size=55))
+    st.altair_chart(style_chart(chart), width="stretch")
+
+
+def style_chart(chart):
+    return (chart.properties(height=260)
+            .configure_axis(gridColor="#E4DCCF", domainColor="#CFC5B5", tickColor="#CFC5B5",
+                            labelColor="#4F4941", titleColor="#4F4941", labelFontSize=12, titleFontSize=12)
+            .configure_legend(labelColor="#1C1A17", labelFontSize=12)
+            .configure_view(stroke=None))
+
+
+def results_page():
+    ui.page_header("Results", "Step 3 of 3 · How your tests went and what Campaign Lab learned. "
+                              "Results come from a simulated audience.")
     camps = campaigns_for(user_id)
     learnings = memory.all(kind="learning")
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Campaigns run", len(camps))
-    k2.metric("Memories stored", len(memory.all()))
-    for col, ch in ((k3, "email"), (k4, "instagram")):
+    k = st.columns(4)
+    k[0].metric("Tests run", len(camps), border=True, height="stretch")
+    k[1].metric("Lessons in memory", len(learnings), border=True, height="stretch")
+    for col, ch in ((k[2], "email"), (k[3], "instagram")):
         ch_c = [c for c in camps if c["channel"] == ch]
-        primary = agent.CHANNELS[ch]["primary"]
+        title = f"{ch.title()} {ui.metric_label(agent.CHANNELS[ch]['primary']).lower()}"
         if ch_c:
             first, last = ch_c[0]["winner_score"], ch_c[-1]["winner_score"]
-            col.metric(f"{ch.title()} {primary}", f"{last:.2%}", f"{(last - first) / first:+.0%} since campaign 1")
+            col.metric(title, f"{last:.2%}", f"{(last - first) / first:+.0%} since test 1",
+                       chart_data=[c["winner_score"] for c in ch_c], chart_type="line", border=True,
+                       height="stretch")
         else:
-            col.metric(f"{ch.title()} {primary}", "-")
-
-    with st.container(border=True):
-        st.markdown("**Quick demo:** run several campaign rounds automatically")
-        d1, d2, d3, d4 = st.columns([1, 1, 2, 1])
-        auto_ch = d1.selectbox("Channel", ["email", "instagram"], key="auto_ch")
-        auto_n = d2.number_input("Rounds", 1, 10, 5)
-        auto_brief = d3.text_input("Brief", "Fall pumpkin spice cold brew launch", key="auto_brief")
-        if d4.button("Run rounds", type="primary"):
-            for _ in range(int(auto_n)):
-                k = len([c for c in campaigns_for(user_id) if c["channel"] == auto_ch]) + 1
-                run_round(memory, user_id, auto_ch, auto_brief, f"{auto_ch.title()} #{k}")
-            st.rerun()
+            col.metric(title, "—", "no tests yet", delta_color="off", border=True, height="stretch")
 
     if not camps:
-        st.info("No campaigns yet. Create one under **New campaign** or use Quick demo above.")
+        st.markdown('<div class="empty"><h2 style="font-size:1.4rem;margin:0 0 6px">No results yet</h2>'
+                    '<p class="muted" style="margin:0">Results appear here after your first test.</p></div>',
+                    unsafe_allow_html=True)
+        st.write("")
+        if st.button("Run your first test", type="primary", icon=":material/science:"):
+            go("create")
     else:
-        left, right = st.columns([3, 2])
-        with left:
-            st.subheader("Performance across campaigns")
-            for ch in ("email", "instagram"):
-                ch_c = [c for c in camps if c["channel"] == ch]
-                if not ch_c:
-                    continue
-                primary = agent.CHANNELS[ch]["primary"]
-                df = pd.DataFrame({"campaign": [c["round"] for c in ch_c],
-                                   f"winner {primary}": [c["winner_score"] for c in ch_c],
-                                   "variant A": [c["results"]["A"][primary] for c in ch_c],
-                                   "variant B": [c["results"]["B"][primary] for c in ch_c]}).set_index("campaign")
-                st.markdown(f"**{ch.title()}: {primary} by campaign**")
-                st.line_chart(df)
-        with right:
-            st.subheader("🧠 What the agent learned")
-            for m in reversed(learnings[-8:]):
-                md = m["metadata"]
-                st.markdown(f"- **{md['channel']} / {md['dimension']}**: `{md['winner']}` > `{md['loser']}` "
-                            f"(+{md['lift']:.0%})")
-            pbs = memory.all(kind="playbook")
-            for ch in ("email", "instagram"):
-                latest = [m for m in pbs if m["metadata"].get("channel") == ch]
-                if latest:
-                    st.markdown(f"**Current {ch} playbook**")
-                    st.json(latest[-1]["metadata"]["config"], expanded=False)
+        if st.button("Run your next test", type="primary", icon=":material/science:"):
+            go("create")
+        left, right = st.columns([3, 2], gap="large")
+        with left, st.container(border=True):
+            st.markdown("**Results by test**")
+            channels = [ch for ch in ("email", "instagram") if any(c["channel"] == ch for c in camps)]
+            ch = st.segmented_control("Channel", channels, default=channels[0], key="perf_ch",
+                                      format_func=CHANNEL_LABELS.get, label_visibility="collapsed") or channels[0]
+            performance_chart([c for c in camps if c["channel"] == ch], ch)
+        with right, st.container(border=True):
+            st.markdown("**What Campaign Lab has learned**")
+            ui.lessons(learnings, limit=7)
 
-        st.subheader("Campaigns")
-        cols = st.columns(3)
-        for i, c in enumerate(reversed(camps)):
-            with cols[i % 3], st.container(border=True):
-                st.markdown(f"**{c['name']}**")
-                st.caption(f"{c['channel']} · round {c['round']} · tested `{c['plan']['tested_dimension']}` · "
-                           f"{c['memories_used']} memories used")
-                st.metric(f"Winner {c['winner']} {c['primary']}", fmt(c["primary"], c["winner_score"]),
-                          f"+{c['lift']:.0%} vs loser")
+        st.header("Test history", anchor=False)
+        df = pd.DataFrame([{
+            "Test": c["name"], "Channel": c["channel"].title(),
+            "Tested": agent.DIMENSION_LABELS.get(c["plan"]["tested_dimension"], c["plan"]["tested_dimension"]),
+            "Result": ("Too close to call" if c.get("tie") else
+                       agent._cap(agent.option_label(c["channel"], c["plan"]["tested_dimension"],
+                                                     c["plan"][c["winner"]][c["plan"]["tested_dimension"]])) + " won"),
+            "Difference": c["lift"], "Best result": c["winner_score"],
+            "Planned by": {"claude": "Claude", "openrouter": "AI writer (OpenRouter)",
+                           "offline": "Built-in strategist"}.get(c.get("strategy_source"), "Autopilot"),
+            "Date": c["created_at"][:10]} for c in reversed(camps)])
+        st.dataframe(df, hide_index=True, width="stretch", column_config={
+            "Difference": st.column_config.NumberColumn(format="percent"),
+            "Best result": st.column_config.NumberColumn(format="percent")})
 
-        st.subheader("Memory ON vs OFF")
-        st.caption("Same simulated audience. Without memory the agent keeps restarting from generic "
-                   "best practices; with memory it compounds wins.")
-        bench_ch = st.selectbox("Benchmark channel", ["email", "instagram"], key="bench")
-        if st.button("Run 8-round benchmark"):
+    with st.expander("Add simulated history", icon=":material/fast_forward:"):
+        st.caption("Runs simulated tests on autopilot (no AI writer) so you can watch learning add up.")
+        d1, d2, d3, d4 = st.columns([1, 1, 2, 1], vertical_alignment="bottom")
+        auto_ch = d1.selectbox("Channel", ["email", "instagram"], key="auto_ch", format_func=CHANNEL_LABELS.get)
+        auto_n = d2.number_input("Tests", 1, 10, 5)
+        auto_brief = d3.text_input("Brief", DEFAULT_BRIEF, key="auto_brief")
+        if d4.button("Run tests", type="primary", width="stretch"):
+            with st.spinner("Running simulated tests..."):
+                for _ in range(int(auto_n)):
+                    n = next_round(user_id, auto_ch)
+                    run_round(memory, user_id, auto_ch, auto_brief, f"{auto_ch.title()} #{n}")
+            st.rerun()
+
+    with st.expander("Why memory matters: with vs without memory", icon=":material/compare_arrows:"):
+        st.caption("Same simulated audience, 8 tests each. Without memory the agent restarts from "
+                   "generic best practice every time; with memory, wins add up.")
+        b1, b2 = st.columns([1, 3], vertical_alignment="bottom")
+        bench_ch = b1.selectbox("Channel", ["email", "instagram"], key="bench", format_func=CHANNEL_LABELS.get)
+        if b2.button("Run comparison"):
             rows = []
-            for mode, use in (("Memory ON", True), ("Memory OFF", False)):
-                bm = MemoryStore(f"{user_id}__bench_{mode.split()[1].lower()}")
+            primary = agent.CHANNELS[bench_ch]["primary"]
+            for mode, use in (("With memory", True), ("Without memory", False)):
+                bm = MemoryStore(f"{user_id}__bench_{'on' if use else 'off'}")
                 bm.client = None  # keep the benchmark local and fast
                 bm.reset()
-                primary = agent.CHANNELS[bench_ch]["primary"]
                 for r in range(1, 9):
                     p = agent.plan(bm, bench_ch, use, r)
                     res = {k: agent.simulate(bench_ch, p[k], f"bench-{bench_ch}-{r}-{k}-{mode}") for k in "AB"}
                     if use:
                         agent.learn(bm, bench_ch, p, res, f"bench {r}")
-                    rows.append({"round": r, "mode": mode, primary: max(res["A"][primary], res["B"][primary])})
+                    rows.append({"test": r, "mode": mode, "value": max(res["A"][primary], res["B"][primary])})
                 bm.reset()
-            bdf = pd.DataFrame(rows).pivot(index="round", columns="mode", values=primary)
-            st.line_chart(bdf)
+            chart = alt.Chart(pd.DataFrame(rows)).mark_line(point=True, strokeWidth=2.5).encode(
+                x=alt.X("test:O", title="Test #", axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("value:Q", title=ui.metric_label(primary), axis=alt.Axis(format="%")),
+                color=alt.Color("mode:N", scale=alt.Scale(domain=["With memory", "Without memory"],
+                                                          range=[INK, MUTED]),
+                                legend=alt.Legend(orient="top", title=None)))
+            st.altair_chart(style_chart(chart), width="stretch")
+
+
+# ---------------- Create campaign ----------------
+def auto_name(channel, brief):
+    return f"{channel.title()} #{next_round(user_id, channel)}: {agent.short_topic(brief)}"
+
+
+def generate(brief, channel, use_memory, custom_name="", avoid=(), force=None, edits=None):
+    camps = campaigns_for(user_id)
+    n_past = len([m for m in memory.all(kind="learning") if m["metadata"].get("channel") == channel])
+    with st.status("Planning your test...", expanded=True) as status:
+        st.write(f"Reading your {n_past} past {CHANNEL_NAMES[channel]} test{'s' if n_past != 1 else ''}"
+                 if use_memory and n_past else "No past tests on this channel yet: starting from best practice")
+        st.write("Writing both versions" + (" with the AI writer (about 20–30 seconds)" if llm_ok else ""))
+        out = strategist.suggest(memory, channel, brief, profile, camps, use_memory,
+                                 next_round(user_id, channel), avoid, force)
+        status.update(label="Your test is ready", state="complete", expanded=False)
+    if out["error"]:
+        st.session_state.llm_error = out["error"]
+    save_draft(user_id, channel, {**out, "brief": brief, "channel": channel, "use_memory": use_memory,
+                                  "custom_name": custom_name, "name": custom_name or auto_name(channel, brief)})
+    st.session_state.pop("last_result", None)
+    st.rerun()
+
+
+def what_changed(draft, brief, use_memory):
+    if draft["brief"] != brief:
+        return "You edited the brief since this suggestion."
+    return f"You turned past results {'on' if use_memory else 'off'} since this suggestion."
+
+
+def last_result_line():
+    camps = campaigns_for(user_id)
+    if not camps:
+        return
+    c = camps[-1]
+    left, right = st.columns([4, 1], vertical_alignment="center")
+    left.markdown(f'<span class="muted">Last result · {ui.esc(c["name"])}: '
+                  f'{ui.esc(result_phrase(c))}</span>', unsafe_allow_html=True)
+    if right.button("View", key="view_last", icon=":material/history:", width="stretch"):
+        st.session_state.last_result = c
+        st.rerun()
+
+
+def result_phrase(c):
+    dim = c["plan"]["tested_dimension"]
+    if c.get("tie"):
+        return "too close to call"
+    return agent.option_label(c["channel"], dim, c["plan"][c["winner"]][dim]) + " won"
+
+
+def create_page():
+    ui.page_header("Run a test", "Step 2 of 3 · Describe what you're promoting. Campaign Lab suggests "
+                                 "one change to test, using what worked before.")
+    if not profile:
+        with st.container(border=True):
+            c1, c2 = st.columns([5, 1.4], vertical_alignment="center")
+            c1.markdown("**Your brand isn't set up yet.** You can still run a test, but the versions "
+                        "won't use your name, voice, logo or colors.")
+            if c2.button("Set up brand", icon=":material/palette:", width="stretch"):
+                go("brand")
+    res = st.session_state.get("last_result")
+    if res and res["user_id"] != user_id:
+        res = None
+    if "channel" not in st.session_state:
+        st.session_state.channel = res["channel"] if res else "email"
+    channel = st.session_state.channel
+    draft = load_draft(user_id, channel)
+
+    # ---- step 1: brief ----
+    step1 = st.empty()
+    with st.container(border=True):
+        c1, c2 = st.columns([3, 1], gap="medium")
+        brief = c1.text_area("What are you promoting?", value=draft["brief"] if draft else DEFAULT_BRIEF,
+                             height=88, max_chars=280,
+                             placeholder="e.g. Back-to-school special: two free trial classes in September")
+        channel = c2.segmented_control("Channel", ["email", "instagram"], key="channel",
+                                       format_func=CHANNEL_LABELS.get) or "email"
+        draft = load_draft(user_id, channel)
+        use_memory = c2.toggle("Use past results", value=draft["use_memory"] if draft else True,
+                               help="On: version A starts from what already won. Off: from common best practice.")
+        with c2.popover("Test name", icon=":material/edit:", width="stretch"):
+            name = st.text_input("Test name (optional)", value=(draft or {}).get("custom_name", ""),
+                                 max_chars=60, placeholder=auto_name(channel, brief))
+        ui.playbook_strip(memory.all(kind="learning") if use_memory else [], channel)
+
+        brief = brief.strip()
+        stale = bool(draft) and not res and (draft["brief"] != brief or draft["use_memory"] != use_memory)
+        if res:
+            pass  # the results below own the next action ("Plan the next test")
+        elif not draft:
+            if st.button("Suggest a test", type="primary", icon=":material/science:", disabled=not brief):
+                generate(brief, channel, use_memory, name.strip())
+            if not brief:
+                st.caption("Add what you're promoting to get a suggestion.")
+            last_result_line()
+        elif stale:
+            st.markdown(ui.tag("Changed") + f'<span class="muted">{what_changed(draft, brief, use_memory)} '
+                        'Undo the change to see it again, or get a new one.</span>', unsafe_allow_html=True)
+            if st.button("Get a new suggestion", type="primary", icon=":material/refresh:", disabled=not brief):
+                generate(brief, channel, use_memory, name.strip())
+    state1 = "active" if (not draft or stale) and not res else "done"
+    with step1:
+        ui.step(1, "Brief", "What you're promoting, and where", state1)
+
+    if res:
+        ui.step(2, "The test", strategy_line(res), "done")
+        render_results(res)
+    elif draft and not stale:
+        if name.strip() != draft.get("custom_name", ""):  # renaming doesn't invalidate the plan
+            draft["custom_name"] = name.strip()
+            draft["name"] = name.strip() or auto_name(channel, draft["brief"])
+            save_draft(user_id, channel, draft)
+        render_test(draft)
+    else:
+        ui.step(2, "The test", "Two versions that differ in one thing", "todo")
+        ui.step(3, "Results", "Which version won, and what gets remembered", "todo")
+
+
+def strategy_line(c):
+    dim = c["plan"]["tested_dimension"]
+    return agent.describe_change(c["channel"], dim, c["plan"]["A"][dim], c["plan"]["B"][dim])
+
+
+def render_test(draft):
+    s, p, ch = draft["strategy"], draft["plan"], draft["channel"]
+    dim = p["tested_dimension"]
+    ui.step(2, "The test", f"Two {CHANNEL_NAMES[ch]} versions that differ only in the {agent.DIMENSION_LABELS[dim]}")
+    ui.test_statement(s, ch, draft["source"], draft.get("n_tests", 0), draft.get("error"))
+
+    t1, t2, _ = st.columns([1, 1, 2.2])
+    options = [tuple(o) for o in draft.get("options", [])]
+    with t1.popover("Choose the change", icon=":material/tune:", width="stretch"):
+        st.caption("Pick what version B changes. Version A stays as it is.")
+        pick = st.selectbox("Test", options, index=None, placeholder="Choose a change",
+                            format_func=lambda o: agent.describe_change(ch, o[0], p["A"][o[0]], o[1]),
+                            label_visibility="collapsed")
+        if st.button("Use this test", type="primary", disabled=pick is None, width="stretch"):
+            generate(draft["brief"], ch, draft["use_memory"], draft.get("custom_name", ""), force=pick)
+        if draft.get("locks"):
+            st.caption("Kept from your brief: " + ", ".join(
+                agent.option_label(ch, d, v) for d, v in draft["locks"].items()) + ".")
+    plan_id = f"{ch}-{dim}-{p['B'][dim]}-{len(draft.get('suggested', []))}"
+    with t2.popover("Edit wording", icon=":material/edit_note:", width="stretch"):
+        st.caption("Fix any wording. Keep the difference between A and B to the one change, "
+                   "so the result stays easy to read.")
+        edited = {}
+        for key, col in zip(("variant_a", "variant_b"), st.columns(2)):
+            with col:
+                st.markdown(f"**Version {key[-1].upper()}**")
+                edited[key] = {f: col.text_area(lbl, s[key][f], key=f"edit_{key}_{f}_{plan_id}",
+                                                height=68 if f != "body" else 120)
+                               for f, lbl in (("headline", "Subject line" if ch == "email" else "First line"),
+                                              ("body", "Body" if ch == "email" else "Caption"),
+                                              ("cta", "Button" if ch == "email" else "Call to action"))}
+        if st.button("Save wording", type="primary", width="stretch"):
+            for key in edited:
+                s[key].update(edited[key])
+            save_draft(user_id, ch, draft)
+            st.rerun()
+
+    diff = agent.option_label(ch, dim, p["B"][dim])
+    st.markdown(f'<div class="diffline"><b>Only difference:</b> version B uses {ui.esc(diff)}.</div>',
+                unsafe_allow_html=True)
+    va, vb = st.columns(2, gap="large")
+    for col, key, copy, other in ((va, "A", s["variant_a"], s["variant_b"]), (vb, "B", s["variant_b"], s["variant_a"])):
+        with col:
+            desc = "What's working now" if key == "A" else f"One change: {diff}"
+            st.markdown(f'<div class="vlabel"><span class="vletter">{key}</span>'
+                        f'<span class="vdesc">{ui.esc(desc)}</span></div>', unsafe_allow_html=True)
+            ui.variant_preview(ch, copy, other, p[key], dim, key, brand_name, profile)
+
+    st.write("")
+    ui.why_section(s)
+    past = draft["past"]
+    if past:
+        with st.expander(f"Past tests with a similar brief ({len(past)})", icon=":material/history:"):
+            st.dataframe(pd.DataFrame([{"Test": c["name"], "Result": agent._cap(result_phrase(c)),
+                                        "Difference": f"{c['lift']:.0%}"} for c in past]),
+                         hide_index=True, width="stretch")
+    if st.query_params.get("debug"):
+        with st.expander("Debug: context sent to the strategist"):
+            st.code(draft["prompt"], language="text")
+
+    with st.container(key="runbar"):
+        b1, b2, b3 = st.columns([1.3, 1.3, 3], vertical_alignment="center")
+        if b1.button("Run simulated test", type="primary", icon=":material/play_arrow:", width="stretch"):
+            with st.spinner("Scoring both versions with a simulated audience..."):
+                c = run_round(memory, user_id, ch, draft["brief"], draft["name"], draft["use_memory"],
+                              plan=p, strategy=s, source=draft["source"],
+                              memories_used=len(draft["context"]["learnings"]))
+            st.session_state.last_result = c
+            save_draft(user_id, ch, None)
+            st.rerun()
+        if b2.button("Suggest another", icon=":material/refresh:", width="stretch",
+                     help="Picks a different change to test for the same brief."):
+            generate(draft["brief"], ch, draft["use_memory"], draft.get("custom_name", ""),
+                     draft.get("suggested", []))
+        b3.markdown(f'<span class="muted"><span class="only-desktop">{SIM_NOTE}</span>'
+                    '<span class="only-mobile">Simulated. Nothing is sent.</span></span>', unsafe_allow_html=True)
+
+
+SCORING_HELP = ("A simulated audience with hidden tastes reacts to both versions; Campaign Lab has to "
+                "discover those tastes one test at a time. Nothing is sent to real people. When the two "
+                f"versions land within {agent.TIE_LIFT:.0%} of each other, that gap could be chance, so it's "
+                "called too close to call and nothing changes in your playbook.")
+
+
+def render_results(res):
+    ch, dim = res["channel"], res["plan"]["tested_dimension"]
+    a_txt = agent.option_label(ch, dim, res["plan"]["A"][dim])
+    b_txt = agent.option_label(ch, dim, res["plan"]["B"][dim])
+    metric = ui.metric_label(res["primary"]).lower()
+    a, b = res["results"]["A"][res["primary"]], res["results"]["B"][res["primary"]]
+    diff = (b - a) / a if a else 0  # same number as the "B vs A" column
+    ui.step(3, "Results", res["name"])
+    if res.get("tie"):
+        verdict = "Too close to call."
+        sub = (f"{agent._cap(b_txt)} and {a_txt} landed within {abs(diff):.1%} of each other on {metric}. "
+               "Version A stays and nothing changes in your playbook.")
+    elif res["winner"] == "B":
+        verdict = f'<mark class="mk">{ui.esc(agent._cap(b_txt))}</mark> won.'
+        sub = f"{diff:.1%} more {metric} than {a_txt}. It joins your playbook."
+    else:
+        verdict = f'<mark class="mk">{ui.esc(agent._cap(a_txt))}</mark> held on.'
+        sub = f"{agent._cap(b_txt)} got {abs(diff):.1%} less {metric}, so {a_txt} stays in your playbook."
+    st.markdown(f'<div>{ui.tag("Simulated result", "sim")}</div><p class="verdict">{verdict}</p>'
+                f'<div class="verdict-sub">{sub}</div>', unsafe_allow_html=True)
+    with st.popover("How was this scored?", icon=":material/help:"):
+        st.markdown(SCORING_HELP)
+
+    left, right = st.columns([3, 2], gap="large")
+    with left:
+        ui.results_table(res)
+        st.markdown('<div class="legend">' + " · ".join(
+            f"<b>{ui.metric_label(m)}</b>: {agent.METRIC_HELP[m]}" for m in res["results"]["A"]) + "</div>",
+                    unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="why-h" role="heading" aria-level="3">Saved to memory</div>'
+                    f'<p class="lesson-quote">{ui.esc(res["learning"])}</p>'
+                    '<div class="muted" style="margin-top:8px">Your next test starts from here.</div>',
+                    unsafe_allow_html=True)
+
+    s = res.get("strategy")
+    if s:
+        win_key = "A" if res.get("tie") else res["winner"]
+        win = s["variant_a" if win_key == "A" else "variant_b"]
+        st.markdown('<div class="step-title" role="heading" aria-level="2" style="margin-top:28px">'
+                    'Ready to send</div><div class="step-sub" style="margin-bottom:10px">Version '
+                    f'{win_key}, the one to keep. Copy it into your {"email tool" if ch == "email" else "Instagram post"}.'
+                    '</div>', unsafe_allow_html=True)
+        pv, txt = st.columns([1, 1], gap="large")
+        with pv:
+            ui.variant_preview(ch, win, win, res["plan"][win_key], None, "A", brand_name, profile)
+        with txt:
+            st.code(ui.plain_copy(ch, win), language=None, wrap_lines=True)
+            st.caption("Use the copy button in the top-right corner of the box.")
+
+    st.write("")
+    keep = a_txt if res.get("tie") or res["winner"] == "A" else b_txt
+    st.markdown(f'<div class="prose">Up next: version A keeps <b>{ui.esc(keep)}</b> and tests one new idea.</div>',
+                unsafe_allow_html=True)
+    n1, n2, _ = st.columns([1.2, 1.2, 3])
+    if n1.button("Plan the next test", type="primary", icon=":material/arrow_forward:", width="stretch"):
+        st.session_state.pop("last_result", None)
+        st.rerun()
+    if n2.button("See all results", icon=":material/insights:", width="stretch"):
+        st.session_state.pop("last_result", None)
+        go("results")
+
+
+# ---------------- Brand profile ----------------
+def brand_page():
+    ui.page_header("Your brand", "Step 1 of 3 · Campaign Lab saves your brand to memory and uses it to "
+                                 "write every version in your voice, with your logo and colors.")
+    if profile and not st.session_state.get("reimport"):
+        n1, n2, _ = st.columns([1.3, 1.6, 3])
+        if n1.button("Run a test", type="primary", icon=":material/arrow_forward:", width="stretch"):
+            go("create")
+        if n2.button("Re-import from website", icon=":material/refresh:", width="stretch"):
+            st.session_state.reimport = True
+            st.rerun()
+        with st.container(border=True):
+            onboarding.render_brand_kit(profile)
+        return
+
+    with st.container(border=True):
+        st.markdown("**Import from your website and Instagram**")
+        st.caption("Demo: this reads a saved copy of the Kung Fu Kids website and Instagram.")
+        c1, c2, c3 = st.columns([2, 2, 1], vertical_alignment="bottom")
+        website_url = c1.text_input("Website URL", value="https://kungfukids.com")
+        insta_handle = c2.text_input("Instagram handle", value="@wushucentral")
+        do_import = c3.button("Import", type="primary", width="stretch")
+    if do_import:
+        scraped = onboarding.run_scrape_animation(website_url, insta_handle)
+        onboarding.save_profile_to_memory(memory, user_id, profiles, scraped)
+        st.session_state.pop("reimport", None)
+        st.toast("Brand saved. Next: run your first test.", icon=":material/check:")
+        st.rerun()
+
+
+# ---------------- Memory ----------------
+def memory_page():
+    ui.page_header("Memory", f"Everything Campaign Lab remembers about {brand_name}: your brand, and one "
+                             "lesson per test. You don't need to do anything here; the tests use it automatically.")
+    q = st.text_input("Search memory", placeholder="e.g. what subject lines work for email?")
+    if q:
+        hits = memory.search(q)
+        with st.container(border=True):
+            for r in hits:
+                st.markdown(f"- {r['memory']}  \n  <span class='muted'>{r['metadata'].get('kind', '')}</span>",
+                            unsafe_allow_html=True)
+            if not hits:
+                st.caption("No matches. Try fewer words.")
+    items = memory.all()
+    if not items:
+        st.info("Nothing remembered yet. Set up your brand to get started.", icon=":material/info:")
+        if st.button("Set up your brand", type="primary"):
+            go("brand")
+        return
+    kinds = sorted({m["metadata"].get("kind", "") for m in items})
+    pick = st.pills("Filter", kinds, selection_mode="multi", default=kinds, label_visibility="collapsed")
+    df = pd.DataFrame([{"Kind": m["metadata"].get("kind"), "Channel": m["metadata"].get("channel", ""),
+                        "Memory": m["memory"], "Stored in": "Mem0" if m["synced_to_mem0"] else "This computer",
+                        "Created": m["created_at"].replace("T", " ")}
+                       for m in reversed(items) if m["metadata"].get("kind", "") in (pick or kinds)])
+    st.dataframe(df, hide_index=True, width="stretch",
+                 column_config={"Memory": st.column_config.TextColumn(width="large")})
+
+
+sidebar()
+PAGES = {"home": st.Page(home_page, title="Home", icon=":material/home:", default=True),
+         "brand": st.Page(brand_page, title="1 · Your brand", icon=":material/palette:", url_path="brand"),
+         "create": st.Page(create_page, title="2 · Run a test", icon=":material/science:", url_path="create"),
+         "results": st.Page(results_page, title="3 · Results", icon=":material/insights:", url_path="results"),
+         "memory": st.Page(memory_page, title="Memory", icon=":material/neurology:", url_path="memory")}
+st.navigation({"": [PAGES["home"]],
+               "Workflow": [PAGES["brand"], PAGES["create"], PAGES["results"]],
+               "Reference": [PAGES["memory"]]}).run()

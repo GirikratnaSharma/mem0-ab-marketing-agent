@@ -1,7 +1,10 @@
-streamlit>=1.40
+streamlit>=1.50
 mem0ai>=2.2
 pandas
 requests
 python-dotenv
-anthropic>=1.0
+anthropic>=1.11
+openai>=2
+pydantic>=2
+altair>=5
 pytest

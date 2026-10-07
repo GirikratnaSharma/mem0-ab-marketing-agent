@@ -6,7 +6,6 @@ Live tests talk to the real Mem0 Platform and only run when MEM0_API_KEY is set:
     pytest                 # everything that can run
     pytest -m "not live"   # offline only
 """
-import ast
 import json
 import os
 import time
@@ -19,26 +18,15 @@ from dotenv import load_dotenv
 import agent
 import memory_store
 from memory_store import MemoryStore
+from onboarding import build_profile_from_scrape
 
 ROOT = Path(__file__).resolve().parent.parent
 ONBOARD_DIR = ROOT / "data" / "business-onboarding"
 load_dotenv(ROOT / ".env")
 
 
-def _load_app_function(name):
-    """Pull one function out of app.py without running the Streamlit app."""
-    tree = ast.parse((ROOT / "app.py").read_text())
-    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    namespace = {}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "app.py", "exec"), namespace)
-    return namespace[name]
-
-
-build_profile_from_scrape = _load_app_function("build_profile_from_scrape")
-
-
 def onboarding_memories(profile):
-    """The two memories app.py's onboarding writes when a profile is saved."""
+    """The two memories onboarding.save_profile_to_memory writes when a profile is saved."""
     return [
         (f"Brand: {profile['brand_name']}. Voice: {profile['voice']}. Rules: {profile['constraints']}",
          {"kind": "brand", "section": "brand_info"}),
@@ -122,13 +110,47 @@ def test_learn_writes_learning_and_playbook(channel, local_memory):
     out = agent.learn(local_memory, channel, p, results, "test campaign")
 
     primary = agent.CHANNELS[channel]["primary"]
-    expected = "B" if results["B"][primary] > results["A"][primary] else "A"
-    assert out["winner"] == expected
+    a, b = results["A"][primary], results["B"][primary]
+    tie = abs(a - b) / min(a, b) < agent.TIE_LIFT
+    expected = "A" if tie or a >= b else "B"
+    assert out["winner"] == expected and out["tie"] == tie
     (learning,) = local_memory.all(kind="learning")
     md = learning["metadata"]
     assert md["channel"] == channel and md["dimension"] == p["tested_dimension"]
     assert md["winner"] == p[expected][p["tested_dimension"]]
     assert local_memory.all(kind="playbook")[-1]["metadata"]["config"] == p[expected]
+
+
+def test_close_result_is_a_tie_and_keeps_the_champion(local_memory):
+    p = agent.make_plan(agent.NAIVE_DEFAULTS["email"], "offer", "free_trial", "test")
+    results = {"A": {"open_rate": 0.2, "ctr": 0.0435, "conversion_rate": 0.01},
+               "B": {"open_rate": 0.2, "ctr": 0.0438, "conversion_rate": 0.01}}
+    out = agent.learn(local_memory, "email", p, results, "Email #1")
+    assert out["tie"] and out["winner"] == "A"
+    assert "too close to call" in out["learning"].lower()
+    (learning,) = local_memory.all(kind="learning")
+    assert learning["metadata"]["winner"] == "discount"
+    champion, _ = agent._champion_from_memory(local_memory, "email")
+    assert champion["offer"] == "discount"
+
+
+def test_lessons_are_plain_sentences(local_memory):
+    p = agent.make_plan(agent.NAIVE_DEFAULTS["email"], "subject_hook", "question", "test")
+    results = {"A": {"open_rate": 0.2, "ctr": 0.03, "conversion_rate": 0.01},
+               "B": {"open_rate": 0.2, "ctr": 0.04, "conversion_rate": 0.01}}
+    out = agent.learn(local_memory, "email", p, results, "Email #2")
+    assert out["learning"].startswith("On email, a question subject line beat an urgent subject line")
+    assert "_" not in out["learning"]
+    assert agent.describe_change("instagram", "format", "single_image", "reel") == \
+        "Try a reel instead of a single photo."
+
+
+@pytest.mark.parametrize("channel", ["email", "instagram"])
+def test_every_option_has_a_plain_label(channel):
+    for dim, values in agent.CHANNELS[channel]["dimensions"].items():
+        assert dim in agent.DIMENSION_LABELS
+        for v in values:
+            assert v in agent.OPTION_LABELS[channel][dim], (dim, v)
 
 
 @pytest.mark.parametrize("channel", ["email", "instagram"])
